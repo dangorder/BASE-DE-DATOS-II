@@ -53,7 +53,8 @@ CREATE TABLE producto (
         ON DELETE RESTRICT,
         
     CONSTRAINT chk_producto_precio_positivo CHECK (precio_lista >= 0),
-    CONSTRAINT chk_producto_stock_no_negativo CHECK (stock >= 0)
+    CONSTRAINT chk_producto_stock_no_negativo CHECK (stock >= 0),
+    CONSTRAINT chk_producto_nombre_no_vacio CHECK (btrim(nombre) <> '')
 );
 
 -- Tabla: CLIENTE
@@ -66,7 +67,12 @@ CREATE TABLE cliente (
     activo BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     
-    CONSTRAINT uq_cliente_email UNIQUE (email)
+    CONSTRAINT uq_cliente_email UNIQUE (email),
+    CONSTRAINT chk_cliente_nombre_no_vacio CHECK (btrim(nombre) <> ''),
+    CONSTRAINT chk_cliente_apellido_no_vacio CHECK (btrim(apellido) <> ''),
+    CONSTRAINT chk_cliente_email_formato CHECK (
+        btrim(email) <> '' AND email ~* '^[^@]+@[^@]+\.[^.]+$'
+    )
 );
 
 -- Tabla: PEDIDO
