@@ -184,3 +184,148 @@ La explicación generada por IA fue contrastada con el comportamiento real y res
 #### Conclusión
 
 `SELECT ... FOR UPDATE` sobre `producto(id=2)` demostró que PostgreSQL combina **MVCC** (que permite lecturas concurrentes sin bloqueos) con **bloqueos exclusivos de fila** (que serializan el acceso de escritura). La Sesión A retuvo el bloqueo, la Sesión B esperó, y la liberación del bloqueo por el `COMMIT` de A permitió que B continuara. El experimento valida el control de concurrencia de PostgreSQL y deja registradas las precisiones terminológicas necesarias para una documentación correcta.
+
+---
+
+## Escenario 3 — Lectura fantasma
+
+**Tabla utilizada:** `producto`
+
+### Objetivo
+
+Analizar el fenómeno de **lectura fantasma** comparando los niveles de aislamiento `READ COMMITTED` y `REPEATABLE READ`: comprobar cómo la aparición de una nueva fila que satisface la misma consulta se percibe (o no) entre dos lecturas de la misma transacción.
+
+### Prueba con `READ COMMITTED`
+
+#### Comandos — Sesión A
+
+```sql
+BEGIN;
+
+SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
+
+SELECT COUNT(*) AS cantidad_productos
+FROM producto;
+```
+
+**Resultado inicial observado:** `cantidad_productos = 1`
+
+La transacción de A permaneció abierta.
+
+#### Comandos — Sesión B
+
+```sql
+BEGIN;
+
+INSERT INTO producto (
+    categoria_id,
+    nombre,
+    descripcion,
+    precio_lista,
+    stock
+)
+VALUES (
+    1,
+    'Producto fantasma',
+    'Producto usado para probar lectura fantasma',
+    500.00,
+    10
+);
+
+COMMIT;
+```
+
+#### Comandos — Sesión A (misma transacción abierta)
+
+```sql
+SELECT COUNT(*) AS cantidad_productos
+FROM producto;
+```
+
+**Resultado observado:** `cantidad_productos = 2`
+
+Finalmente se cerró la transacción de A con `ROLLBACK`.
+
+#### Resultados observados (`READ COMMITTED`)
+
+La segunda consulta de la Sesión A devolvió un valor distinto al de la primera dentro de la misma transacción: `COUNT(*)` pasó de **1 a 2**. La fila insertada y confirmada por B pasó a ser visible para el nuevo *snapshot* de la segunda lectura: **se produjo una lectura fantasma**.
+
+### Prueba con `REPEATABLE READ`
+
+Tras el experimento anterior existían **2 productos** en la tabla.
+
+#### Comandos — Sesión A
+
+```sql
+BEGIN;
+
+SET TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+
+SELECT COUNT(*) AS cantidad_productos
+FROM producto;
+```
+
+**Resultado inicial observado:** `cantidad_productos = 2`
+
+La transacción de A permaneció abierta.
+
+#### Comandos — Sesión B
+
+```sql
+BEGIN;
+
+INSERT INTO producto (
+    categoria_id,
+    nombre,
+    descripcion,
+    precio_lista,
+    stock
+)
+VALUES (
+    1,
+    'Producto fantasma 2',
+    'Segundo producto usado para probar lectura fantasma',
+    750.00,
+    5
+);
+
+COMMIT;
+```
+
+#### Comandos — Sesión A (misma transacción abierta)
+
+```sql
+SELECT COUNT(*) AS cantidad_productos
+FROM producto;
+```
+
+**Resultado observado:** `cantidad_productos = 2`
+
+La Sesión A no vio el tercer producto confirmado por B.
+
+Finalmente se ejecutó `ROLLBACK` en A.
+
+#### Resultados observados (`REPEATABLE READ`)
+
+La segunda consulta de la Sesión A siguió devolviendo `COUNT(*) = 2` aunque B había insertado y confirmado un tercer producto: `COUNT(*)` se mantuvo de **2 a 2**. La Sesión A no percibió la nueva fila: **no se produjo lectura fantasma**.
+
+#### Explicación técnica
+
+- Bajo `READ COMMITTED`, PostgreSQL redefine el *snapshot* al comienzo de **cada sentencia**. El primer `COUNT(*)` vio las 1 fila existentes en ese instante; tras el `INSERT` + `COMMIT` de B, el segundo `COUNT(*)` tomó un *snapshot* nuevo y vio 2 filas. Por eso el conteo cambió dentro de la misma transacción.
+- Bajo `REPEATABLE READ`, PostgreSQL **fija un único *snapshot*** al comienzo de la transacción. La segunda consulta reutiliza ese mismo *snapshot*, por lo que no incorpora la fila insertada y confirmada por B después del inicio: el conteo se mantuvo en 2.
+- **MVCC** mantiene múltiples versiones de las filas; el nivel de aislamiento determina cuáles son visibles. En `READ COMMITTED` el snapshot es por sentencia; en `REPEATABLE READ` el snapshot es fijo por transacción.
+
+#### Contraste entre explicación de IA y comportamiento real
+
+La explicación inicial de IA coincidió en líneas generales con el comportamiento observado sobre `producto`: en `READ COMMITTED` el `COUNT(*)` pasó de 1 a 2 (fantasma visible) y en `REPEATABLE READ` se mantuvo de 2 a 2 (fantasma invisible).
+
+Sin embargo, durante la **revisión crítica** se detectó una **imprecisión respecto del estándar SQL** en la comparación teórica (punto 7), que fue **corregida antes de documentarla**:
+
+1. `READ COMMITTED` **permite** lecturas fantasma.
+2. Según la clasificación tradicional del estándar SQL, `REPEATABLE READ` **puede permitir** lecturas fantasma.
+3. No obstante, PostgreSQL implementa `REPEATABLE READ` mediante **snapshot isolation** y, en PostgreSQL, las lecturas fantasma **no aparecen** en este tipo de lectura: la transacción mantiene un **snapshot estable**.
+4. `SERIALIZABLE` proporciona garantías todavía más fuertes frente a anomalías de serialización. Además, no debe presentarse `SERIALIZABLE` de PostgreSQL simplemente como un sistema basado en bloqueos de rango: PostgreSQL lo implementa mediante **Serializable Snapshot Isolation (SSI)**.
+
+#### Conclusión
+
+El experimento sobre `producto` demostró que `READ COMMITTED` permite la lectura fantasma (el `COUNT(*)` cambió de 1 a 2), mientras que `REPEATABLE READ` la evita gracias al snapshot estable de la transacción (el `COUNT(*)` se mantuvo de 2 a 2). El comportamiento real validó la explicación técnica, con la precisión terminológica del estándar SQL corregida y contrastada previamente a su documentación.
